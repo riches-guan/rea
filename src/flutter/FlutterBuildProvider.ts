@@ -81,6 +81,7 @@ interface LibraryFacts {
     present: boolean;
     bytes: number | null;
     sha256: string | null;
+    elfHeaderValid: boolean | null;
     sources: number;
     candidates: readonly string[];
   };
@@ -99,6 +100,7 @@ const emptyFacts = (): LibraryFacts => ({
     present: false,
     bytes: null,
     sha256: null,
+    elfHeaderValid: null,
     sources: 0,
     candidates: [],
   },
@@ -276,6 +278,7 @@ export class FlutterBuildProvider {
         const buildIdScanner = new BuildIdScanner();
         const labeledScanner = new LabeledStringScanner();
         let bytes = 0;
+        let firstBytes: Buffer | null = null;
         for await (const chunk of stream) {
           if (abortReason !== undefined)
             return err(
@@ -284,6 +287,7 @@ export class FlutterBuildProvider {
               }),
             );
           const view = chunk as Buffer;
+          if (firstBytes === null) firstBytes = view.subarray(0, 4);
           bytes += view.byteLength;
           if (bytes > LIBRARY_MAX_BYTES)
             return err(
@@ -314,6 +318,13 @@ export class FlutterBuildProvider {
               present: true,
               bytes,
               sha256: digest,
+              elfHeaderValid:
+                firstBytes !== null &&
+                firstBytes.length === 4 &&
+                firstBytes[0] === 0x7f &&
+                firstBytes[1] === 0x45 &&
+                firstBytes[2] === 0x4c &&
+                firstBytes[3] === 0x46,
               sources: scan.sources,
               candidates: scan.candidates,
             },
@@ -339,6 +350,7 @@ export class FlutterBuildProvider {
             present: value.libapp.present,
             bytes: value.libapp.bytes,
             sha256: value.libapp.sha256,
+            elf_header_valid: value.libapp.elfHeaderValid,
             snapshot_hash_sources: value.libapp.sources,
             snapshot_hash_candidates: [...value.libapp.candidates],
             snapshot_hash:
@@ -361,7 +373,8 @@ export class FlutterBuildProvider {
         (entry) =>
           (entry.libapp.present &&
             (entry.libapp.snapshot_hash === null ||
-              entry.libapp.snapshot_hash_sources === 0)) ||
+              entry.libapp.snapshot_hash_sources < 2 ||
+              entry.libapp.elf_header_valid !== true)) ||
           entry.libapp.present !== entry.libflutter.present,
       );
       return ok(
@@ -379,6 +392,26 @@ export class FlutterBuildProvider {
               "The snapshot hash identifies a Dart SDK build only against an external mapping dataset; REA performs no lookup",
               "Release engine builds often carry no labeled Dart version string; absence is reported, not guessed",
               "The snapshot hash sits 20 bytes after each snapshot magic in the AOT payload; findings are observations of that layout",
+              ...abis
+                .filter(
+                  (entry) =>
+                    entry.libapp.present &&
+                    entry.libapp.snapshot_hash_sources < 2,
+                )
+                .map(
+                  (entry) =>
+                    `lib/${entry.abi}/libapp.so carries ${String(entry.libapp.snapshot_hash_sources)} snapshot section(s); a complete AOT payload carries two, so the library is truncated or nonstandard`,
+                ),
+              ...abis
+                .filter(
+                  (entry) =>
+                    entry.libapp.present &&
+                    entry.libapp.elf_header_valid !== true,
+                )
+                .map(
+                  (entry) =>
+                    `lib/${entry.abi}/libapp.so does not begin with the ELF magic; the payload is damaged or masquerading`,
+                ),
               ...(flutterDetected
                 ? []
                 : [
@@ -482,6 +515,7 @@ export class FlutterBuildProvider {
         );
       const imagePath = join(snapshot.root, "libapp.so");
       const imageHash = createHash("sha256");
+      await writeFile(imagePath, Buffer.alloc(0), { flag: "w" });
       {
         const stream = await reader.open(selected.entry, signal);
         let total = 0;

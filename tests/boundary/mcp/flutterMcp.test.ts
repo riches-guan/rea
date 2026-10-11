@@ -38,6 +38,7 @@ it("advertises an exact valid Flutter schema and records inline evidence through
                   present: true,
                   bytes: 24691632,
                   sha256: "b".repeat(64),
+                  elf_header_valid: true,
                   snapshot_hash_sources: 2,
                   snapshot_hash_candidates: [
                     "65817c30a78bb44c3dc3771876b6010a",

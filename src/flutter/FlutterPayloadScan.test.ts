@@ -107,6 +107,17 @@ describe("BuildIdScanner", () => {
     );
   });
 
+  it("reads an 8-byte build-id note from older toolchains", () => {
+    const scanner = new BuildIdScanner();
+    const note = Uint8Array.from([
+      0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+      0x47, 0x4e, 0x55, 0x00, 0x37, 0x2c, 0xb6, 0x41, 0xf8, 0xbd, 0x80, 0xde,
+    ]);
+    scanner.push(Uint8Array.from([9, 9]));
+    scanner.push(note);
+    expect(scanner.result()).toBe("372cb641f8bd80de");
+  });
+
   it("reports null when no note exists", () => {
     const scanner = new BuildIdScanner();
     scanner.push(Uint8Array.from([0, 0, 0, 0]));
@@ -115,18 +126,16 @@ describe("BuildIdScanner", () => {
 });
 
 describe("LabeledStringScanner", () => {
-  it.skipIf(
-    !exists(
-      "/tmp/opencode/flutter-target/extracted/lib/arm64-v8a/libflutter.so",
-    ),
-  )("collects the real clang toolchain line from libflutter.so", () => {
-    const real = readFileSync(
-      "/tmp/opencode/flutter-target/extracted/lib/arm64-v8a/libflutter.so",
-    ).subarray(0, 4 * 1024 * 1024);
+  it("collects a full clang line within the 500-character bound", () => {
+    const line =
+      "Android (5900059 based on r365631c1) clang version 9.0.8 (https://android.googlesource.com/toolchain/llvm-project 207d7abc1a2abf3ef8d4301736d6a7ebc224a290) (based on LLVM 9.0.8svn)";
     const scanner = new LabeledStringScanner();
-    for (let offset = 0; offset < real.length; offset += 1024 * 512)
-      scanner.push(real.subarray(offset, offset + 1024 * 512));
-    expect(scanner.result().dartVersion).toBeNull();
+    scanner.push(
+      Uint8Array.from(
+        Array.from(`\x00${line}\x00`, (character) => character.charCodeAt(0)),
+      ),
+    );
+    expect(scanner.result().toolchainLines).toEqual([line]);
   });
 
   it("reads a labeled Dart VM version string when a build carries one", () => {

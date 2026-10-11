@@ -103,17 +103,20 @@ export class SnapshotHashScanner {
   }
 }
 
-/** GNU build-id note header: namesz=4, descsz=20, type=3, "GNU\0". */
-const BUILD_ID_NOTE_PREFIX = Uint8Array.from([
-  0x04, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x47,
-  0x4e, 0x55, 0x00,
+/** GNU build-id note header: namesz=4, descsz (variable), type=3, "GNU\0". */
+const BUILD_ID_NOTE_PREFIX_FIXED = Uint8Array.from([0x04, 0x00, 0x00, 0x00]);
+const BUILD_ID_NOTE_TAIL = Uint8Array.from([
+  0x03, 0x00, 0x00, 0x00, 0x47, 0x4e, 0x55, 0x00,
 ]);
-const BUILD_ID_LENGTH = 20;
-const BUILD_ID_PATTERN = /^[0-9a-f]{40}$/u;
+/** Builds emit 8- or 20-byte ids; accept anything hex-printable in range. */
+const BUILD_ID_MIN_BYTES = 4;
+const BUILD_ID_MAX_BYTES = 64;
+const BUILD_ID_PATTERN = /^[0-9a-f]{8,128}$/u;
 
 /**
- * Incremental scanner for GNU build-id notes. The note body is 20 bytes,
- * so a 36-byte carry is enough to survive chunk boundaries.
+ * Incremental scanner for GNU build-id notes. Old toolchains emit 8-byte
+ * ids and current ones 20 bytes, so the descriptor length is read from the
+ * note header instead of assumed.
  */
 export class BuildIdScanner {
   #buildId: string | null = null;
@@ -124,21 +127,36 @@ export class BuildIdScanner {
     const joined = new Uint8Array(this.#buffer.length + chunk.length);
     joined.set(this.#buffer, 0);
     joined.set(chunk, this.#buffer.length);
-    const prefix = findBytes(joined, BUILD_ID_NOTE_PREFIX, 0);
-    if (
-      prefix !== -1 &&
-      prefix + BUILD_ID_NOTE_PREFIX.length + BUILD_ID_LENGTH <= joined.length
-    ) {
-      const start = prefix + BUILD_ID_NOTE_PREFIX.length;
-      const candidate = Array.from(
-        joined.subarray(start, start + BUILD_ID_LENGTH),
-        (byte) => byte.toString(16).padStart(2, "0"),
-      ).join("");
-      if (BUILD_ID_PATTERN.test(candidate)) this.#buildId = candidate;
+    // Scan every namesz=4 candidate; early bytes can collide with padding.
+    let probe = 0;
+    for (;;) {
+      const prefix = findBytes(joined, BUILD_ID_NOTE_PREFIX_FIXED, probe);
+      if (prefix === -1) break;
+      if (prefix + 6 <= joined.length) {
+        const described = joined[prefix + 4]! + joined[prefix + 5]! * 0x100;
+        if (
+          described >= BUILD_ID_MIN_BYTES &&
+          described <= BUILD_ID_MAX_BYTES &&
+          findBytes(joined, BUILD_ID_NOTE_TAIL, prefix + 8) === prefix + 8 &&
+          prefix + 16 + described <= joined.length
+        ) {
+          const start = prefix + 16;
+          const candidate = Array.from(
+            joined.subarray(start, start + described),
+            (byte) => byte.toString(16).padStart(2, "0"),
+          ).join("");
+          if (BUILD_ID_PATTERN.test(candidate)) {
+            this.#buildId = candidate;
+            break;
+          }
+        }
+      }
+      probe = prefix + 1;
     }
+    // Keep enough trailing bytes for the fixed prefix plus one maximum note.
     const keep = Math.min(
       joined.length,
-      BUILD_ID_NOTE_PREFIX.length + BUILD_ID_LENGTH,
+      4 + 2 + BUILD_ID_NOTE_TAIL.length + BUILD_ID_MAX_BYTES,
     );
     this.#buffer = joined.slice(joined.length - keep);
   }
@@ -156,7 +174,7 @@ export interface LabeledStringScan {
 
 const DART_VERSION_PATTERN = /Dart VM version:[^\x00\n]{0,200}/u;
 const TOOLCHAIN_PATTERN =
-  /Android \([^)\x00\n]{0,80}\) clang version [^\x00\n]{0,200}|based on LLVM \d[^\x00\n]{0,80}/u;
+  /Android \([^)\x00\n]{0,80}\) clang version [^\x00\n]{0,500}|based on LLVM \d[^\x00\n]{0,80}/u;
 const MAX_TOOLCHAIN_LINES = 4;
 
 /**

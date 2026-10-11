@@ -72,13 +72,13 @@ if (options.apk !== null) {
     );
     void hashes;
     check(
-      "engine build-ids reported per ABI",
+      "engine build-ids present and hex per ABI",
       identified.abis
         .filter((abi) => abi.libflutter.present)
         .every(
           (abi) =>
-            abi.libflutter.build_id === null ||
-            /^[0-9a-f]{40}$/.test(abi.libflutter.build_id),
+            abi.libflutter.build_id !== null &&
+            /^[0-9a-f]{16,40}$/.test(abi.libflutter.build_id),
         ),
       identified.abis
         .map((abi) => abi.libflutter.build_id?.slice(0, 12))

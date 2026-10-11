@@ -68,6 +68,8 @@ export const flutterResultSchemas = {
           present: z.boolean(),
           bytes: z.number().int().nonnegative().nullable(),
           sha256: digestSchema.nullable(),
+          /** True when the first bytes carry the ELF magic. */
+          elf_header_valid: z.boolean().nullable(),
           /** Number of Dart snapshot sections found (vm + isolate). */
           snapshot_hash_sources: z.number().int().nonnegative(),
           /** Distinct hashes found; more than one means the sections disagree. */
@@ -86,7 +88,7 @@ export const flutterResultSchemas = {
           sha256: digestSchema.nullable(),
           build_id: z
             .string()
-            .regex(/^[0-9a-f]{40}$/u)
+            .regex(/^[0-9a-f]{8,128}$/u)
             .nullable()
             .describe("GNU build-id note, when present"),
           dart_version: z

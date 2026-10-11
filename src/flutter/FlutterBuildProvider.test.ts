@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -34,7 +33,8 @@ const TOOLCHAIN_LINE =
 
 const libapp = (hash: string): Buffer =>
   Buffer.concat([
-    Buffer.from("ELF-payload-prefix\x00"),
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46]),
+    Buffer.from("payload-prefix\x00"),
     snapshotSection(hash),
     Buffer.from("middle\x00"),
     snapshotSection(hash),
@@ -47,14 +47,89 @@ const libflutter = (): Buffer =>
     Buffer.from(`\x00${TOOLCHAIN_LINE}\x00`),
   ]);
 
-const galleryLibapp = (): Buffer | null => {
-  try {
-    return readFileSync(
-      "/tmp/opencode/flutter-target/extracted/lib/arm64-v8a/libapp.so",
-    );
-  } catch {
-    return null;
-  }
+/**
+ * Self-contained Dart AOT image: a synthetic ELF64 carrying the four
+ * snapshot symbols, two snapshot sections, and a string pool, so goldens
+ * do not depend on any file outside the repository.
+ */
+const aotImage = (): Buffer => {
+  const hash = "65817c30a78bb44c3dc3771876b6010a";
+  const SHENT = 64;
+  const shoff = 64 + 56;
+  const symbols = [
+    { name: "_kDartVmSnapshotData", value: 0x1000, size: 52 },
+    { name: "_kDartVmSnapshotInstructions", value: 0x1800, size: 16 },
+    { name: "_kDartIsolateSnapshotData", value: 0x2000, size: 0x600 },
+    { name: "_kDartIsolateSnapshotInstructions", value: 0x2600, size: 16 },
+  ];
+  const dynsymOff = shoff + 3 * SHENT + 16;
+  const dynstrOff = dynsymOff + symbols.length * 24;
+  const image = Buffer.alloc(dynstrOff + 256);
+  image.writeUInt32LE(0x464c457f, 0);
+  image[4] = 2;
+  image[5] = 1;
+  image.writeBigUInt64LE(BigInt(64), 0x20);
+  image.writeBigUInt64LE(BigInt(shoff), 0x28);
+  image.writeUInt16LE(56, 0x36);
+  image.writeUInt16LE(1, 0x38);
+  image.writeUInt16LE(SHENT, 0x3a);
+  image.writeUInt16LE(3, 0x3c);
+  image.writeUInt32LE(1, 64);
+  const dyn = shoff + SHENT;
+  const str = dyn + SHENT;
+  image.writeUInt32LE(11, dyn + 4);
+  image.writeBigUInt64LE(BigInt(dynsymOff), dyn + 0x18);
+  image.writeBigUInt64LE(BigInt(symbols.length * 24), dyn + 0x20);
+  image.writeUInt32LE(2, dyn + 0x28);
+  image.writeUInt32LE(3, str + 4);
+  image.writeBigUInt64LE(BigInt(dynstrOff), str + 0x18);
+  image.writeBigUInt64LE(BigInt(256), str + 0x20);
+  let cursor = dynstrOff + 1;
+  const offsets = symbols.map((symbol) => {
+    image.write(symbol.name, cursor, "latin1");
+    const at = cursor - dynstrOff;
+    cursor += symbol.name.length + 1;
+    return at;
+  });
+  symbols.forEach((symbol, index) => {
+    const base = dynsymOff + index * 24;
+    image.writeUInt32LE(offsets[index]!, base);
+    image.writeBigUInt64LE(BigInt(symbol.value), base + 8);
+    image.writeBigUInt64LE(BigInt(symbol.size), base + 16);
+  });
+  const snapshotSection = (digest: string): Buffer =>
+    Buffer.concat([
+      Buffer.from([
+        0xf5, 0xf5, 0xdc, 0xdc, 0x49, 0x0d, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0,
+        0, 0,
+      ]),
+      Buffer.from(digest, "latin1"),
+    ]);
+  const pool = Buffer.concat([
+    Buffer.from(
+      "package:adaptive_breakpoints/src/adaptive_breakpoints.dart\x00",
+    ),
+    Buffer.from("package:animations/src/fade_scale_transition.dart\x00"),
+    Buffer.from("dart:_http\x00dart:_http/crypto.dart\x00"),
+    Buffer.from("AdaptiveBreakpoint\x00FadeScaleTransition\x00"),
+  ]);
+  const vmSection = snapshotSection(hash);
+  const isolateSection = Buffer.concat([
+    snapshotSection(hash),
+    Buffer.from([0]),
+    pool,
+  ]);
+  return Buffer.concat([
+    image,
+    Buffer.alloc(0x1000 - image.length),
+    vmSection,
+    Buffer.alloc(0x1800 - 0x1000 - vmSection.length),
+    Buffer.alloc(16),
+    Buffer.alloc(0x2000 - 0x1800 - 16),
+    isolateSection,
+    Buffer.alloc(0x600 - isolateSection.length),
+    Buffer.alloc(16),
+  ]);
 };
 
 /** Build a real APK-shaped zip with the `zip` CLI. */
@@ -205,11 +280,11 @@ it("refuses a requested ABI the payload does not carry", async () => {
   expect(result.error.message).toContain("arm64-v8a");
 });
 
-test.skipIf(process.platform === "win32" || galleryLibapp() === null)(
-  "inspects the real Gallery AOT snapshot end to end",
+test.skipIf(process.platform === "win32")(
+  "inspects a full synthetic AOT image end to end",
   async () => {
     const apk = await buildApk("realgallery.apk", [
-      { path: "lib/arm64-v8a/libapp.so", bytes: galleryLibapp()! },
+      { path: "lib/arm64-v8a/libapp.so", bytes: aotImage() },
     ]);
     const result = await new FlutterBuildProvider({
       environment: {},
@@ -240,8 +315,8 @@ test.skipIf(process.platform === "win32" || galleryLibapp() === null)(
         .filter((section) => section.name.endsWith("Data"))
         .every((section) => section.magic_valid),
     ).toBe(true);
-    expect(value.string_pool.package_uri_count).toBeGreaterThan(500);
-    expect(value.string_pool.dart_uri_count).toBeGreaterThan(100);
+    expect(value.string_pool.package_uri_count).toBe(2);
+    expect(value.string_pool.dart_uri_count).toBe(2);
     expect(value.coverage).toBe("partial");
   },
 );
