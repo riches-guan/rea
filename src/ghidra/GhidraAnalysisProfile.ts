@@ -97,6 +97,7 @@ export const resolveGhidraAnalysisProfile = (
         string_inventory_evidence: "defined-data-coverage-v1",
         location_resolution: "explicit-address-exact-entry-symbol-first-v3",
         instruction_flow_evidence: "decoded-return-pcode-v1",
+        instruction_references: "exact-address-incoming-v1",
         function_boundary_observations: "ghidra-terminal-call-limitations-v1",
         no_return_repair:
           installation.platform === "win32"
