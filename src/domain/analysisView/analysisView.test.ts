@@ -1,4 +1,6 @@
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { expect, it } from "vitest";
+import { z } from "zod";
 
 import { resolveJavaScriptSourceMapReference } from "../javascript/javascriptSourceMapPaths.js";
 import { functionDossierSchema } from "../hopperValues.js";
@@ -765,4 +767,82 @@ it("rejects unsupported parent operations and incompatible collections", () => {
     ok: false,
     error: { _tag: "AnalysisInputError" },
   });
+});
+
+const analysisViewSource = {
+  kind: "retained-evidence",
+  evidence_id: `ev_${"b".repeat(64)}`,
+} as const;
+
+it("advertises collection-scoped item selectors through the converted input schema", () => {
+  const validate = new Ajv2020({ strict: false }).compile(
+    z.toJSONSchema(inspectAnalysisViewInputSchema, {
+      unrepresentable: "any",
+    }),
+  );
+  const item = (collection: string, selector: object) => ({
+    source: analysisViewSource,
+    view: { kind: "item", collection, selector },
+  });
+  expect(validate(item("modules", { path: "renderer.js" }))).toBe(true);
+  expect(
+    validate(item("modules", { node_id: `jag_node_${"c".repeat(64)}` })),
+  ).toBe(true);
+  expect(validate(item("sections", { index: 0 }))).toBe(true);
+  expect(validate(item("symbols", { name: "main" }))).toBe(true);
+  expect(
+    validate({
+      source: analysisViewSource,
+      view: { kind: "summary" },
+    }),
+  ).toBe(true);
+  expect(
+    validate({
+      source: analysisViewSource,
+      view: { kind: "page", collection: "modules", offset: 0, limit: 10 },
+    }),
+  ).toBe(true);
+  expect(validate(item("modules", { index: 0 }))).toBe(false);
+  expect(validate(item("modules", { name: "main" }))).toBe(false);
+  expect(validate(item("sections", { path: "renderer.js" }))).toBe(false);
+  expect(
+    validate(item("symbols", { node_id: `jag_node_${"c".repeat(64)}` })),
+  ).toBe(false);
+});
+
+it("keeps runtime selection semantics and names the selector constraint", () => {
+  const parse = (view: unknown) =>
+    inspectAnalysisViewInputSchema.safeParse({
+      source: analysisViewSource,
+      view,
+    });
+  expect(
+    parse({
+      kind: "item",
+      collection: "modules",
+      selector: { node_id: `jag_node_${"c".repeat(64)}` },
+    }).success,
+  ).toBe(true);
+  expect(
+    parse({ kind: "item", collection: "sections", selector: { index: 0 } })
+      .success,
+  ).toBe(true);
+  const moduleIndex = parse({
+    kind: "item",
+    collection: "modules",
+    selector: { index: 0 },
+  });
+  expect(moduleIndex.success).toBe(false);
+  expect(JSON.stringify(moduleIndex.error?.issues)).toContain(
+    "Module items are selected by exact path or node_id, not index or name.",
+  );
+  const sectionPath = parse({
+    kind: "item",
+    collection: "sections",
+    selector: { path: "renderer.js" },
+  });
+  expect(sectionPath.success).toBe(false);
+  expect(JSON.stringify(sectionPath.error?.issues)).toContain(
+    "Section and symbol items are selected by index or exact name, not path or node_id.",
+  );
 });
