@@ -311,14 +311,20 @@ export class HopperClient {
     signal?: AbortSignal,
   ): Promise<Result<HopperServerInfo, AnalysisError>> {
     if (isAborted(signal)) return err(new HopperCancelledError());
-    this.#operationFailure = undefined;
     if (
       this.#socket !== undefined ||
       this.#resources.launch !== undefined ||
       this.#resources.runtimeRoot !== undefined
     ) {
+      // A retry blocked by retained resources must not clear a recorded
+      // startup failure: wiping it here would make operationHealth()
+      // report idle for a client whose next start is still wedged, so a
+      // same-target open_binary would fast-path it instead of retrying
+      // cleanup. The failure is cleared below once a fresh attempt
+      // actually proceeds.
       return err(new HopperProtocolError("Hopper client is already started"));
     }
+    this.#operationFailure = undefined;
     this.#resources.shutdownConfirmed = false;
     const deadline = new ProviderStartupDeadline(
       this.#options.startupTimeoutMs,
@@ -435,20 +441,26 @@ export class HopperClient {
   }
 
   #rememberStartupFailure(failure: AnalysisError): void {
-    if (failure instanceof HopperProcessError)
+    if (failure instanceof HopperProcessError) {
       this.#rememberProcessFailure(failure, []);
-    else if (
-      this.#operationFailure === undefined &&
-      (failure instanceof HopperTimeoutError ||
-        failure instanceof HopperStartError)
-    )
-      this.#operationFailure = {
-        state:
-          failure instanceof HopperTimeoutError ? "not_started" : "unknown",
-        exitCode: null,
-        startupFailure: true,
-        requests: [],
-      };
+      return;
+    }
+    if (this.#operationFailure !== undefined) return;
+    // Fail closed: every startup failure records a producer state. An
+    // uncharacterized failure (cancelled startup, invalid health handshake,
+    // or any future error type) must never report idle to the fast-path
+    // probe — unknown/not_started both retire the client instead of
+    // fast-pathing a wedge whose next start stays blocked.
+    this.#operationFailure = {
+      state:
+        failure instanceof HopperTimeoutError ||
+        failure instanceof HopperCancelledError
+          ? "not_started"
+          : "unknown",
+      exitCode: null,
+      startupFailure: true,
+      requests: [],
+    };
   }
 
   /** Invoke one declared operation, returning timeout and cancellation as values. */
